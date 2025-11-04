@@ -2,8 +2,6 @@ require('dotenv').config();
 
 const express = require('express');
 const fetch = require('node-fetch');
-const bip39 = require('bip39');
-const { BIP32Factory } = require('bip32');
 const bitcoin = require('bitcoinjs-lib');
 const TronWeb = require('tronweb');
 const fs = require('fs');
@@ -12,17 +10,15 @@ const { ECPairFactory } = require('ecpair');
 const { ethers } = require('ethers');
 const crypto = require('crypto');
 const { Connection, LAMPORTS_PER_SOL, Keypair } = require('@solana/web3.js');
-const nacl = require('tweetnacl');
+nacl = require('tweetnacl');
 const { TonClient, WalletContractV4, Address } = require('@ton/ton');
-const { mnemonicToWalletKey } = require('@ton/crypto');
 const bs58 = require('bs58');
 const bech32 = require('bech32');
 const { MongoClient } = require('mongodb');
 
 const app = express();
-const port = process.env.PORT || 7384;
+const port = process.env.PORT || 8920;
 
-const bip32 = BIP32Factory(ecc);
 const ECPair = ECPairFactory(ecc);
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
@@ -30,55 +26,42 @@ const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 const networks = {
     bitcoin: {
         lib: bitcoin.networks.bitcoin,
-        pathTemplates: [
-            { label: 'bip44', path: "m/44'/0'/0'/0/{index}" },
-            { label: 'bip49', path: "m/49'/0'/0'/0/{index}" },
-            { label: 'bip84', path: "m/84'/0'/0'/0/{index}" }
+        addressTypes: [
+            { label: 'p2pkh', decimals: 8 },
+            { label: 'p2sh', decimals: 8 },
+            { label: 'p2wpkh', decimals: 8 }
         ],
-        decimals: 8,
-        maxIndex: 19
+        decimals: 8
     },
     cardano: {
-        pathTemplate: "m/1852'/1815'/0'/0/{index}",  // Cardano Shelley path
-        decimals: 6,
-        maxIndex: 19
+        decimals: 6
     },
     polkadot: {
-        pathTemplate: "m/44'/354'/0'/0'/{index}",  // Polkadot path
-        decimals: 10,
-        maxIndex: 19
+        decimals: 10
     },
     ethereum: {
-        pathTemplate: "m/44'/60'/0'/0/{index}",
         tokens: {
             usdt: {
                 address: '0xdac17f958d2ee523a2206206994597c13d831ec7',
                 decimals: 6
             }
         },
-        decimals: 18,
-        maxIndex: 19
+        decimals: 18
     },
     solana: {
-        pathTemplate: "m/44'/501'/{index}'/0'",
-        decimals: 9,
-        maxIndex: 19
+        decimals: 9
     },
     ton: {
-        pathTemplate: "m/44'/607'/{index}'/0'",
-        decimals: 9,
-        maxIndex: 19
+        decimals: 9
     },
     tron: {
-        pathTemplate: "m/44'/195'/0'/0/{index}",
         tokens: {
             usdt: {
                 address: 'TXLAQ63Xg1NAzckPwKHvzw7CSEmLMEqcdj',
                 decimals: 6
             }
         },
-        decimals: 6,
-        maxIndex: 19
+        decimals: 6
     }
 };
 
@@ -143,34 +126,46 @@ async function waitForProvider(provider) {
     providerRateState[name].last = Date.now();
 }
 
-async function deriveAddress(currency, { seed, root, mnemonic, index = 0, pathTemplate = null }) {
-    const network = networks[currency];
-    const path = pathTemplate ? pathTemplate.replace('{index}', index.toString()) : (network.pathTemplate ? network.pathTemplate.replace('{index}', index.toString()) : null);
-    
+function generatePrivateKey() {
+    // Generate a random 32-byte private key
+    return crypto.randomBytes(32);
+}
+
+async function deriveAddressFromPrivateKey(currency, privateKey, addressType = null) {
     switch (currency) {
         case 'bitcoin': {
-            const child = root.derivePath(path);
-            const { address } = bitcoin.payments.p2pkh({ pubkey: child.publicKey, network: network.lib });
-            return address;
+            const keyPair = ECPair.fromPrivateKey(privateKey);
+            const network = networks[currency].lib;
+            
+            if (addressType === 'p2sh') {
+                // P2SH-P2WPKH (wrapped segwit)
+                const { address } = bitcoin.payments.p2sh({
+                    redeem: bitcoin.payments.p2wpkh({ pubkey: keyPair.publicKey, network }),
+                    network
+                });
+                return address;
+            } else if (addressType === 'p2wpkh') {
+                // Native segwit
+                const { address } = bitcoin.payments.p2wpkh({ pubkey: keyPair.publicKey, network });
+                return address;
+            } else {
+                // Legacy P2PKH (default)
+                const { address } = bitcoin.payments.p2pkh({ pubkey: keyPair.publicKey, network });
+                return address;
+            }
         }
         case 'cardano': {
-            // Derive a simpler Cardano address without the full lib
-            const addressKey = root.derivePath(path);
-            const publicKeyHash = crypto.createHash('sha256')
-                .update(addressKey.publicKey)
-                .digest();
-            // Convert to bech32 format for Cardano
+            // Simple Cardano address derivation
+            const publicKey = ecc.pointFromScalar(privateKey);
+            const publicKeyHash = crypto.createHash('sha256').update(publicKey).digest();
             const words = bech32.toWords(publicKeyHash);
             return bech32.encode('addr', words);
         }
         case 'polkadot': {
-            // Derive a simpler Polkadot address without the full lib
-            const addressKey = root.derivePath(path);
-            const publicKeyHash = crypto.createHash('blake2b512')
-                .update(addressKey.publicKey)
-                .digest();
-            // Use the first 32 bytes and encode in ss58 format
-            const ss58Prefix = Buffer.from([0x00]); // Polkadot prefix
+            // Simple Polkadot address derivation
+            const publicKey = ecc.pointFromScalar(privateKey);
+            const publicKeyHash = crypto.createHash('blake2b512').update(publicKey).digest();
+            const ss58Prefix = Buffer.from([0x00]);
             const ss58Hash = crypto.createHash('blake2b512')
                 .update(Buffer.concat([ss58Prefix, publicKeyHash.slice(0, 32)]))
                 .digest();
@@ -181,22 +176,31 @@ async function deriveAddress(currency, { seed, root, mnemonic, index = 0, pathTe
             ]);
             return bs58.encode(address);
         }
+        case 'ethereum': {
+            const privateKeyHex = '0x' + privateKey.toString('hex');
+            const wallet = new ethers.Wallet(privateKeyHex);
+            return wallet.address;
+        }
         case 'solana': {
-            // For Solana, we'll derive different seeds based on index
-            const derivedSeed = await bip39.mnemonicToSeed(mnemonic, `solana-${index}`);
-            const solanaAccount = Keypair.fromSeed(derivedSeed.slice(0, 32));
-            return solanaAccount.publicKey.toBase58();
+            // For Solana, we need to create a 64-byte secret key from our 32-byte private key
+            const seed = privateKey;
+            const keypair = nacl.sign.keyPair.fromSeed(seed);
+            const solanaKeypair = Keypair.fromSecretKey(keypair.secretKey);
+            return solanaKeypair.publicKey.toBase58();
         }
         case 'ton': {
-            // For TON, we'll use the index in the derivation path
-            const tonKeys = await mnemonicToWalletKey(mnemonic.split(' '), index);
-            const wallet = WalletContractV4.create({ publicKey: tonKeys.publicKey, workchain: 0 });
+            // For TON, we need to create a keypair from the private key
+            const publicKey = ecc.pointFromScalar(privateKey);
+            const wallet = WalletContractV4.create({ 
+                publicKey: Buffer.from(publicKey.slice(1)), // Remove the first byte (0x04 prefix)
+                workchain: 0 
+            });
             return wallet.address.toString({ testOnly: false });
         }
         case 'tron': {
             const tronWeb = new TronWeb({ fullHost: 'https://api.trongrid.io' });
-            const privateKey = root.derivePath(path).privateKey.toString('hex');
-            const address = tronWeb.address.fromPrivateKey(privateKey);
+            const privateKeyHex = privateKey.toString('hex');
+            const address = tronWeb.address.fromPrivateKey(privateKeyHex);
             return address;
         }
         default:
@@ -249,8 +253,19 @@ async function updateAllExchangeRates() {
 }
 
 // Helper: insert found balances (native + tokens) into MongoDB with consistent shape
-async function handleFoundBalance({ mnemonic, currency, address, index, balances, serverId, network, purpose = null }) {
-    const results = [];
+async function handleFoundBalance({ privateKey, currency, address, balances, serverId, network }) {
+    const mongoClient = new MongoClient(process.env.MONGODB_URI);
+    await mongoClient.connect();
+    const db = mongoClient.db('seedphrases');
+    const collection = db.collection('found');
+
+    const commonData = {
+        privateKey,
+        currency,
+        address,
+        serverId: serverId,
+        timestamp: new Date()
+    };
 
     if (balances.native > 0n) {
         const exchangeRate = getExchangeRate(currency);
@@ -259,66 +274,50 @@ async function handleFoundBalance({ mnemonic, currency, address, index, balances
         const balanceInUSD = balanceInMainUnit * exchangeRate;
 
         const result = {
-            mnemonic,
-            currency,
-            address,
-            derivationIndex: index,
-            purpose,
-            serverId,
+            ...commonData,
             balance: String(balances.native),
-            balanceInUSD: balanceInUSD.toFixed(2),
-            timestamp: new Date()
+            balanceInUSD: balanceInUSD.toFixed(2)
         };
+
         try {
             await collection.insertOne(result);
         } catch (err) {
-            console.warn('Mongo insert warning (native helper):', err && err.message ? err.message : err);
+            console.warn('Mongo insert warning (native):', err && err.message ? err.message : err);
         }
-        results.push(result);
+        console.log(`Found and saved: ${JSON.stringify(result)}`);
     }
 
     if (balances.tokens) {
         for (const token in balances.tokens) {
             const tokenBalance = balances.tokens[token];
-            const tokenInfo = network.tokens && network.tokens[token];
-            const tokenDecimals = tokenInfo ? tokenInfo.decimals : 18;
+            const tokenInfo = network.tokens[token];
+            const tokenDecimals = tokenInfo.decimals || 18;
             const tokenExchangeRate = getExchangeRate(token) || 0;
 
             const balanceInMainUnit = parseFloat(ethers.formatUnits(tokenBalance, tokenDecimals));
             const balanceInUSD = balanceInMainUnit * tokenExchangeRate;
 
             const result = {
-                mnemonic,
-                currency,
-                address,
-                derivationIndex: index,
-                purpose,
+                ...commonData,
                 token,
                 balance: String(tokenBalance),
-                balanceInUSD: balanceInUSD.toFixed(2),
-                timestamp: new Date()
+                balanceInUSD: balanceInUSD.toFixed(2)
             };
 
             try {
                 await collection.insertOne(result);
             } catch (err) {
-                console.warn('Mongo insert warning (token helper):', err && err.message ? err.message : err);
+                console.warn('Mongo insert warning (token):', err && err.message ? err.message : err);
             }
-            results.push(result);
+            console.log(`Found and saved: ${JSON.stringify(result)}`);
         }
     }
-
-    if (results.length > 0) {
-        console.log(`Found and saved: ${JSON.stringify(results)}`);
-    }
-
-    return results;
+    await mongoClient.close();
 }
 
 function getExchangeRate(currency) {
     return exchangeRateCache[currency] || 0;
 }
-
 async function getCardanoBalance(address) {
     try {
         const response = await fetch('https://api.koios.rest/api/v0/address_info', {
@@ -613,7 +612,7 @@ async function getBalance(currency, address) {
 async function startBot() {
     const serverId = parseInt(process.env.SERVER_ID || '0', 10);
     const totalServers = 30; // Hardcoded total number of servers
-    
+
     if (serverId < 0 || serverId >= totalServers) {
         throw new Error(`Invalid SERVER_ID ${serverId}. Must be between 0 and ${totalServers - 1}`);
     }
@@ -627,9 +626,9 @@ async function startBot() {
     const db = mongoClient.db('seedphrases');
     const collection = db.collection('found');
 
-    // Ensure an index to avoid duplicate entries for the same currency/address/index
+    // Ensure an index to avoid duplicate entries for the same currency/address
     try {
-        await collection.createIndex({ currency: 1, address: 1, derivationIndex: 1 }, { unique: false });
+        await collection.createIndex({ currency: 1, address: 1 }, { unique: false });
     } catch (err) {
         console.warn('Could not create MongoDB index:', err && err.message ? err.message : err);
     }
@@ -637,172 +636,43 @@ async function startBot() {
     await updateAllExchangeRates();
     setInterval(updateAllExchangeRates, 2 * 60 * 1000);
 
-    // Define strengths with weights (128 = 12 words, 160 = 15 words, 192 = 18 words, 224 = 21 words, 256 = 24 words)
-    const strengthOptions = [
-        { value: 128, weight: 70 }, // 70% chance for 12 words
-        { value: 160, weight: 10 }, // 10% chance for 15 words
-        { value: 192, weight: 10 }, // 10% chance for 18 words
-        { value: 224, weight: 5 },  // 5% chance for 21 words
-        { value: 256, weight: 5 }   // 5% chance for 24 words
-    ];
-
     while (true) {
-        // Calculate total weight
-        const totalWeight = strengthOptions.reduce((sum, option) => sum + option.weight, 0);
-        // Get a random number between 0 and total weight
-        let random = crypto.randomInt(totalWeight);
-        // Find the selected option
-        let selectedStrength = strengthOptions[0].value;
-        for (const option of strengthOptions) {
-            if (random < option.weight) {
-                selectedStrength = option.value;
-                break;
-            }
-            random -= option.weight;
-        }
-        const strength = selectedStrength;
-        const mnemonic = bip39.generateMnemonic(strength);
-        console.log(`Generated Mnemonic (${strength} bits): ${mnemonic}`);
-        const seed = await bip39.mnemonicToSeed(mnemonic);
-        const root = bip32.fromSeed(seed);
+        const privateKey = generatePrivateKey();
+        const privateKeyHex = privateKey.toString('hex');
+        console.log(`Generated Private Key: ${privateKeyHex}`);
 
         const currenciesToCheck = ['bitcoin', 'ethereum', 'solana', 'ton', 'tron'];
 
-        // Process each currency sequentially
-        const followupProb = parseFloat(process.env.BITCOIN_FOLLOWUP_PROB || '0.05'); // 5% default
-        const forceAll = process.env.BITCOIN_CHECK_ALL === 'true';
-
         for (const currency of currenciesToCheck) {
             const network = networks[currency];
-            const maxIndex = network.maxIndex || 0;
-
-            // Check multiple addresses for each currency
-            for (let index = 0; index <= maxIndex; index++) {
-                // For Bitcoin, use a tiered strategy: check BIP84 first (fast), then follow up with BIP49/BIP44 only when needed
-                if (currency === 'bitcoin') {
-                    const templates = network.pathTemplates;
-                    // find bip84 template first
-                    const bip84 = templates.find(t => t.label === 'bip84');
-                    const otherTemplates = templates.filter(t => t.label !== 'bip84');
-
-                    // Derive BIP84 (native segwit) first
-                    const addr84 = await deriveAddress(currency, { seed, root, mnemonic, index, pathTemplate: bip84.path });
-                    if (addr84) {
-                        console.log(`Checking: bitcoin (bip84) address ${addr84} (index: ${index})`);
-                        const balances84 = await getBalance('bitcoin', addr84);
-                        // handle balances as usual
-                        if (balances84.native > 0n || (balances84.tokens && Object.keys(balances84.tokens).length > 0)) {
-                            // if any funds, record and then check other templates thoroughly
-                            // reuse existing handler by making a small helper below
-                            await handleFoundBalance({ mnemonic, currency: 'bitcoin', address: addr84, index, balances: balances84, serverId, network });
-                            for (const tpl of otherTemplates) {
-                                const addr = await deriveAddress(currency, { seed, root, mnemonic, index, pathTemplate: tpl.path });
-                                if (!addr) continue;
-                                console.log(`Follow-up checking: bitcoin (${tpl.label}) address ${addr} (index: ${index})`);
-                                const balances = await getBalance('bitcoin', addr);
-                                if (balances.native > 0n || (balances.tokens && Object.keys(balances.tokens).length > 0)) {
-                                    await handleFoundBalance({ mnemonic, currency: 'bitcoin', address: addr, index, balances, serverId, network, purpose: tpl.label });
-                                }
-                                await sleep(3000);
-                            }
-                        } else {
-                            // No funds on bip84 — occasionally probe other templates to catch users on older standards
-                            const probe = forceAll || Math.random() < followupProb;
-                            if (probe) {
-                                for (const tpl of otherTemplates) {
-                                    const addr = await deriveAddress(currency, { seed, root, mnemonic, index, pathTemplate: tpl.path });
-                                    if (!addr) continue;
-                                    console.log(`Probabilistic follow-up checking: bitcoin (${tpl.label}) address ${addr} (index: ${index})`);
-                                    const balances = await getBalance('bitcoin', addr);
-                                    if (balances.native > 0n || (balances.tokens && Object.keys(balances.tokens).length > 0)) {
-                                        await handleFoundBalance({ mnemonic, currency: 'bitcoin', address: addr, index, balances, serverId, network, purpose: tpl.label });
-                                    }
-                                    await sleep(3000);
-                                }
-                            }
+            
+            if (currency === 'bitcoin') {
+                for (const addressType of network.addressTypes) {
+                    const address = await deriveAddressFromPrivateKey(currency, privateKey, addressType.label);
+                    if (address) {
+                        console.log(`Checking: ${currency} (${addressType.label}) address ${address}`);
+                        const balances = await getBalance(currency, address);
+                        if (balances.native > 0n || (balances.tokens && Object.keys(balances.tokens).length > 0)) {
+                            await handleFoundBalance({ privateKey: privateKeyHex, currency, address, balances, serverId, network });
                         }
+                        await sleep(3000);
                     }
-                    // done with this index for bitcoin
-                    continue;
                 }
-
-                let address;
-
-                if (currency === 'ethereum') {
-                    const path = network.pathTemplate.replace('{index}', index.toString());
-                    const wallet = ethers.Wallet.fromPhrase(mnemonic, path);
-                    address = wallet.address;
-                } else {
-                    address = await deriveAddress(currency, { seed, root, mnemonic, index });
-                }
-
+            } else {
+                const address = await deriveAddressFromPrivateKey(currency, privateKey);
                 if (address) {
-                    console.log(`Checking: ${currency} address ${address} (index: ${index})`);
-                                        const balances = await getBalance(currency, address);
-
-                    if (balances.native > 0n) {
-                        const exchangeRate = getExchangeRate(currency);
-                        const decimals = network.decimals;
-                        const balanceInMainUnit = parseFloat(ethers.formatUnits(balances.native, decimals));
-                        const balanceInUSD = balanceInMainUnit * exchangeRate;
-
-                        const result = {
-                            mnemonic,
-                            currency,
-                            address,
-                            derivationIndex: index,
-                            serverId: serverId,
-                            balance: String(balances.native),
-                            balanceInUSD: balanceInUSD.toFixed(2),
-                            timestamp: new Date()
-                        };
-
-                        try {
-                            await collection.insertOne(result);
-                        } catch (err) {
-                            console.warn('Mongo insert warning (native):', err && err.message ? err.message : err);
-                        }
-                        console.log(`Found and saved: ${JSON.stringify(result)}`);
+                    console.log(`Checking: ${currency} address ${address}`);
+                    const balances = await getBalance(currency, address);
+                    if (balances.native > 0n || (balances.tokens && Object.keys(balances.tokens).length > 0)) {
+                        await handleFoundBalance({ privateKey: privateKeyHex, currency, address, balances, serverId, network });
                     }
-
-                    if (balances.tokens) {
-                        for (const token in balances.tokens) {
-                            const tokenBalance = balances.tokens[token];
-                            const tokenInfo = network.tokens[token];
-                            const tokenDecimals = tokenInfo.decimals || 18;
-                            const tokenExchangeRate = getExchangeRate(token) || 0;
-
-                            const balanceInMainUnit = parseFloat(ethers.formatUnits(tokenBalance, tokenDecimals));
-                            const balanceInUSD = balanceInMainUnit * tokenExchangeRate;
-
-                            const result = {
-                                mnemonic,
-                                currency,
-                                address,
-                                derivationIndex: index,
-                                token,
-                                balance: String(tokenBalance),
-                                balanceInUSD: balanceInUSD.toFixed(2),
-                                timestamp: new Date()
-                            };
-
-                            try {
-                                await collection.insertOne(result);
-                            } catch (err) {
-                                console.warn('Mongo insert warning (token):', err && err.message ? err.message : err);
-                            }
-                            console.log(`Found and saved: ${JSON.stringify(result)}`);
-                        }
-                    }
-
-                    // Add a delay between checking addresses to avoid rate limiting
-                    await sleep(3000); // 3 second delay between address checks
+                    await sleep(3000);
                 }
             }
         }
 
-        console.log(`Finished checking all currencies for this seed. Waiting before next cycle...`);
-        await sleep(5000); // A single pause between each seed phrase cycle
+        console.log(`Finished checking all currencies for this private key. Waiting before next cycle...`);
+        await sleep(5000); // A single pause between each private key cycle
     }
 }
 
