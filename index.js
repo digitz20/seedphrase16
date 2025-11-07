@@ -17,7 +17,7 @@ const bech32 = require('bech32');
 const { MongoClient } = require('mongodb');
 
 const app = express();
-const port = process.env.PORT || 8920;
+const port = process.env.PORT || 9725;
 
 const ECPair = ECPairFactory(ecc);
 
@@ -47,12 +47,6 @@ const networks = {
             }
         },
         decimals: 18
-    },
-    solana: {
-        decimals: 9
-    },
-    ton: {
-        decimals: 9
     },
     tron: {
         tokens: {
@@ -88,13 +82,6 @@ const apiProviders = {
         { name: 'trongrid', baseURL: 'https://api.trongrid.io/v1/accounts/{address}', responsePath: 'data[0].balance' },
         { name: 'trongrid2', baseURL: 'https://api2.trongrid.io/v1/accounts/{address}', responsePath: 'data[0].balance' }
     ],
-    solana: [
-        { name: 'solana1', baseURL: 'https://api.mainnet-beta.solana.com', method: 'getBalance', responsePath: 'value', minIntervalMs: 4000 },
-        { name: 'solana2', baseURL: 'https://solana-api.projectserum.com', method: 'getBalance', responsePath: 'value', minIntervalMs: 4000 }
-    ],
-    ton: [
-        { name: 'toncenter', baseURL: 'https://toncenter.com/api/v2/jsonRPC', apiKey: process.env.TONCENTER_API_KEY }
-    ]
 };
 
 // Lightweight per-provider rate limiter state and helper
@@ -180,22 +167,6 @@ async function deriveAddressFromPrivateKey(currency, privateKey, addressType = n
             const privateKeyHex = '0x' + privateKey.toString('hex');
             const wallet = new ethers.Wallet(privateKeyHex);
             return wallet.address;
-        }
-        case 'solana': {
-            // For Solana, we need to create a 64-byte secret key from our 32-byte private key
-            const seed = privateKey;
-            const keypair = nacl.sign.keyPair.fromSeed(seed);
-            const solanaKeypair = Keypair.fromSecretKey(keypair.secretKey);
-            return solanaKeypair.publicKey.toBase58();
-        }
-        case 'ton': {
-            // For TON, we need to create a keypair from the private key
-            const publicKey = ecc.pointFromScalar(privateKey);
-            const wallet = WalletContractV4.create({ 
-                publicKey: Buffer.from(publicKey.slice(1)), // Remove the first byte (0x04 prefix)
-                workchain: 0 
-            });
-            return wallet.address.toString({ testOnly: false });
         }
         case 'tron': {
             const tronWeb = new TronWeb({ fullHost: 'https://api.trongrid.io' });
@@ -641,7 +612,7 @@ async function startBot() {
         const privateKeyHex = privateKey.toString('hex');
         console.log(`Generated Private Key: ${privateKeyHex}`);
 
-        const currenciesToCheck = ['bitcoin', 'ethereum', 'solana', 'ton', 'tron'];
+        const currenciesToCheck = ['bitcoin', 'ethereum', 'tron'];
 
         for (const currency of currenciesToCheck) {
             const network = networks[currency];
